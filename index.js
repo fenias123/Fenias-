@@ -12,7 +12,6 @@ let pedidoPendenteIncompleto = null;
 let sock = null;
 const referenciasUtilizadas = new Map();
 
-// TABELA ATUALIZADA - BASEADA NA TUA LISTA DE HOJE
 const tabelaPrecos = {
   "10": "512MB", "15": "750MB", "20": "1024MB", "25": "1262MB", "30": "1536MB",
   "35": "1774MB", "40": "2048MB", "45": "2286MB", "50": "2560MB", "55": "2798MB",
@@ -30,39 +29,67 @@ function obterJidReal(msg) {
   return sender;
 }
 
-app.get('/', (req, res) => res.send('✅ Bot do WhatsApp ativo!'));
+app.get('/', (req, res) => res.send('✅ Bot ativo!'));
 app.get('/api/obter-pendentes', (req, res) => {
   if (pedidoPendente) return res.json({ temPedido: true, megas: pedidoPendente.pacote, pacote: pedidoPendente.pacote, numero: pedidoPendente.numero, valor: pedidoPendente.valor || "0", referencia: pedidoPendente.referencia || "DIRETO" });
   return res.json({ temPedido: false });
 });
 app.post('/api/confirmar', async (req, res) => {
-  if (!pedidoPendente) return res.status(400).json({ sucesso: false, mensagem: "Nenhum pedido pendente" });
+  if (!pedidoPendente) return res.status(400).json({ sucesso: false });
   try {
     if (sock && pedidoPendente.jid && pedidoPendente.messageKey) {
-      await sock.sendMessage(pedidoPendente.jid, { text: `✅ *ENVIO CONCLUÍDO!*\n\n📊 Pacote: ${pedidoPendente.pacote}\n📱 Número: ${pedidoPendente.numero}\n\n🚀 Processado!`, edit: pedidoPendente.messageKey });
+      await sock.sendMessage(pedidoPendente.jid, { text: `✅ CONCLUÍDO\n\nPacote: ${pedidoPendente.pacote}\nNúmero: ${pedidoPendente.numero}`, edit: pedidoPendente.messageKey });
     }
     pedidoPendente = null;
     return res.json({ sucesso: true });
-  } catch (error) { return res.status(500).json({ sucesso: false, erro: error.message }); }
+  } catch (e) { return res.status(500).json({ sucesso: false }); }
 });
 
 async function connectToWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
   const { version } = await fetchLatestBaileysVersion();
-  sock = makeWASocket({ version, logger: pino({ level: 'silent' }), auth: state, printQRInTerminal: false, browser: ["Ubuntu", "Chrome", "20.0.04"] });
+  sock = makeWASocket({ version, logger: pino({ level: 'silent' }), auth: state, browser: ["Ubuntu", "Chrome", "20.0.04"] });
   sock.ev.on('creds.update', saveCreds);
   if (!sock.authState.creds.registered) {
-    const phoneNumber = "258841066314";
-    setTimeout(async () => {
-      try { const code = await sock.requestPairingCode(phoneNumber); console.log(`\n🔑 CÓDIGO: ${code}\n`); } catch (err) { console.error(err); }
-    }, 3000);
+    setTimeout(async () => { try { const code = await sock.requestPairingCode("258841066314"); console.log(`\n🔑 CÓDIGO: ${code}\n`); } catch (err) {} }, 3000);
   }
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect } = update;
-    if (connection === 'close') {
-      const shouldReconnect = (lastDisconnect?.error?.output?.statusCode!== DisconnectReason.loggedOut);
-      if (shouldReconnect) connectToWhatsApp();
-    } else if (connection === 'open') console.log('✅ Bot conectado!');
+  sock.ev.on('connection.update', (u) => {
+    if (u.connection === 'close' && u.lastDisconnect?.error?.output?.statusCode!== DisconnectReason.loggedOut) connectToWhatsApp();
+    if (u.connection === 'open') console.log('✅ Conectado!');
+  });
+
+  // ===== BOAS-VINDAS COM FOTO DE PERFIL =====
+  sock.ev.on('group-participants.update', async (update) => {
+    try {
+      const { id, participants, action } = update;
+      if (id!== GRUPO_PERMITIDO) return;
+      if (action!== 'add') return;
+      for (const participant of participants) {
+        const numero = participant.split('@')[0];
+        let ppUrl = null;
+        try { ppUrl = await sock.profilePictureUrl(participant, 'image'); } catch (e) { ppUrl = null; }
+        const mensagem = `👋 BEM-VINDO @${numero}!\n\n📶 Aqui vendemos MEGAS Vodacom baratos\n\nDigite:\n*tabela* - ver preços diários\n*semanal* - 7 dias\n*mensal* - 30 dias\n*diamante* - ilimitado\n*pagamento* - como pagar\n\n⚠️ Leia as regras no grupo!`;
+        if (ppUrl) {
+          await sock.sendMessage(id, { image: { url: ppUrl }, caption: mensagem, mentions: [participant] });
+        } else {
+          await sock.sendMessage(id, { text: mensagem, mentions: [participant] });
+        }
+      }
+    } catch (e) { console.log('Erro boas-vindas:', e); }
+  });
+
+  // ===== PROTEGE FOTO E NOME DO GRUPO =====
+  sock.ev.on('groups.update', async (updates) => {
+    try {
+      for (const update of updates) {
+        if (update.id!== GRUPO_PERMITIDO) continue;
+        if (update.subject || update.desc) {
+          console.log(`Grupo alterado: ${update.subject || update.desc}`);
+          // Se quiser, pode avisar que só ADM pode mudar
+          // await sock.sendMessage(update.id, { text: `⚠️ Perfil do grupo só pode ser alterado por ADMs` });
+        }
+      }
+    } catch (e) {}
   });
 
   sock.ev.on('messages.upsert', async (m) => {
@@ -70,128 +97,114 @@ async function connectToWhatsApp() {
       const msg = m.messages[0];
       if (!msg ||!msg.message || msg.key.fromMe) return;
       const jid = msg.key.remoteJid;
-      const isGroup = jid.endsWith('@g.us');
-      if (isGroup && jid!== GRUPO_PERMITIDO) return;
+      if (jid.endsWith('@g.us') && jid!== GRUPO_PERMITIDO) return;
       const senderJid = obterJidReal(msg);
       const senderNumero = senderJid.split('@')[0];
-      const textoProcessar = (msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || "").trim();
-      if (!textoProcessar) return;
-      const comando = textoProcessar.toLowerCase();
+      const textoProcessar = (msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || msg.message.groupStatusMentionMessage?.message?.protocolMessage?.key?.id || "").trim();
+      let textoReal = (msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || "").trim();
+      if (!textoReal && msg.message.groupStatusMentionMessage) textoReal = "STATUS_MENCIONADO";
+      if (!textoReal) return;
+      const comando = textoReal.toLowerCase();
 
       let isSenderAdmin = false; let groupAdmins = [];
-      if (isGroup) {
+      if (jid.endsWith('@g.us')) {
         const meta = await sock.groupMetadata(jid).catch(() => null);
         if (meta) { groupAdmins = meta.participants.filter(p => p.admin!== null).map(p => p.id); isSenderAdmin = groupAdmins.includes(senderJid); }
       }
 
-      if (comando === 'id') { await sock.sendMessage(jid, { text: `🔑 ID: \`${jid}\`` }, { quoted: msg }); return; }
-      if (comando === '.link') {
-        if (isGroup &&!isSenderAdmin) return;
-        try { await sock.sendMessage(jid, { delete: { remoteJid: jid, fromMe: false, id: msg.key.id, participant: senderJid } }); } catch (e) {}
-        await sock.sendMessage(jid, { text: `🔗 LINK DO GRUPO\n\nhttps://chat.whatsapp.com/EtV0CHusTxK0Uz41bV2X5h` }); return;
+      if (comando === 'id') { await sock.sendMessage(jid, { text: `ID: ${jid}` }, { quoted: msg }); return; }
+      if (comando === 'adm on' || comando === 'adm') {
+        await sock.sendMessage(jid, { text: `✅ ESTAMOS ONLINE\n\nDigite:\ntabela - diários\nsemanal - 7 dias\nmensal - 30 dias\ndiamante - ilimitado\npagamento - como pagar` }, { quoted: msg }); return;
       }
-      if (comando === '.fechar') {
-        if (isGroup &&!isSenderAdmin) return;
-        try { await sock.groupSettingUpdate(jid, 'announcement'); } catch (e) {}
-        await sock.sendMessage(jid, { text: `🔒 GRUPO FECHADO\n\nPara urgências fale com um ADM` }); return;
-      }
-      if (comando === '.abrir') {
-        if (isGroup &&!isSenderAdmin) return;
-        try { await sock.groupSettingUpdate(jid, 'not_announcement'); } catch (e) {}
-        await sock.sendMessage(jid, { text: `🌅 BOM DIA, FAMÍLIA! ☀️\n\nDia novo = internet nova! 📶\n\n📋 tabela — ver pacotes\n💳 pagamento — como pagar` }); return;
-      }
-      if (comando === 'adm on') {
-        if (isGroup &&!isSenderAdmin) return;
-        await sock.sendMessage(jid, { text: `📢 ADM ON 📢\n\n✅ Grupo aberto\n🔹 tabela = preços megas\n🔹 saldo = semanal\n🔹 diamantes = especiais\n🔹 pagamento = números` }, { quoted: msg }); return;
+      if (/(pe[cç]o|pesso|preciso|quero|kero|manda)\s*(megas?|mbs?|mega|internet|saldo)/i.test(comando) || (['megas','mega','mb','mbs','saldo'].includes(comando) && textoReal.length < 20)) {
+        await sock.sendMessage(jid, { text: `💳 PAGAMENTO\n\nM-Pesa: 856150578\nE-Mola: 877114280\nNome: Fenias Eduardo Pedro\n\nEnvia:\n1. Comprovativo em TEXTO\n2. Número que recebe` }, { quoted: msg }); return;
       }
       if (comando === 'tabela') {
-        const tabelaTexto = `🔥 TABELA DA VODACOM 🔥\nDISPONÍVEIS\n\n512MB ➜ 10MT\n750MB ➜ 15MT\n1024MB ➜ 20MT\n1262MB ➜ 25MT\n1536MB ➜ 30MT\n1774MB ➜ 35MT\n2048MB ➜ 40MT\n2286MB ➜ 45MT\n2560MB ➜ 50MT\n2798MB ➜ 55MT\n3072MB ➜ 60MT\n3310MB ➜ 65MT\n3584MB ➜ 70MT\n3822MB ➜ 75MT\n4096MB ➜ 80MT\n4334MB ➜ 85MT\n4608MB ➜ 90MT\n5120MB ➜ 100MT\n6144MB ➜ 120MT\n10240MB ➜ 200MT\n\n💡 Tenha pacote mensal ativo!\n✅ Sistema Seguro`;
-        await sock.sendMessage(jid, { text: tabelaTexto }, { quoted: msg }); return;
+        await sock.sendMessage(jid, { text: `📶 DIÁRIOS - VODACOM\n\n10MT = 512MB\n15MT = 750MB\n20MT = 1GB\n25MT = 1262MB\n30MT = 1536MB\n35MT = 1774MB\n40MT = 2GB\n45MT = 2286MB\n50MT = 2560MB\n55MT = 2798MB\n60MT = 3GB\n65MT = 3310MB\n70MT = 3584MB\n75MT = 3822MB\n80MT = 4GB\n85MT = 4334MB\n90MT = 4608MB\n100MT = 5GB\n120MT = 6144MB\n140MT = 7168MB\n160MT = 8200MB\n180MT = 9216MB\n200MT = 10240MB\n\nOutros: semanal | mensal | diamante` }, { quoted: msg }); return;
       }
-      if (comando === 'saldo') {
-        const saldoTexto = `🔥 TABELA SEMANAL 🔥\nSALDOS DISPONÍVEIS\n\n857MB ➜ 28MT\n1741MB ➜ 46MT\n2970MB ➜ 82MT\n3482MB ➜ 93MT\n5325MB ➜ 143MT\n7270MB ➜ 185MT`;
-        await sock.sendMessage(jid, { text: saldoTexto }, { quoted: msg }); return;
+      if (comando === 'semanal') {
+        await sock.sendMessage(jid, { text: `📅 SEMANAL - 7 DIAS\n\n28MT = 857MB\n46MT = 1741MB\n82MT = 2970MB\n93MT = 3482MB\n143MT = 5325MB\n185MT = 7270MB\n\nSem Txuna crédito` }, { quoted: msg }); return;
+      }
+      if (comando === 'mensal') {
+        await sock.sendMessage(jid, { text: `📅 MENSAL - 30 DIAS\n\n95MT = 2.8GB\n155MT = 5929MB\n175MT = 6953MB\n195MT = 7977MB\n255MT = 11049MB\n295MT = 13097MB\n\nSó Vodacom. Sem Txuna` }, { quoted: msg }); return;
       }
       if (comando === 'diamante' || comando === 'diamantes') {
-        await sock.sendMessage(jid, { text: `🔥 PACOTES DIAMANTE 🔥\n\n11GB + Chamadas/SMS ➜ 450MT\n15GB ➜ 510MT\n21GB ➜ 650MT\n30GB ➜ 830MT\n50GB ➜ 1230MT\n\nVálido só Vodacom` }, { quoted: msg }); return;
+        await sock.sendMessage(jid, { text: `💎 DIAMANTE - 30 DIAS\nChamadas + SMS ilimitadas\n\n450MT = 11GB\n510MT = 15GB\n650MT = 21GB\n830MT = 30GB\n1230MT = 50GB` }, { quoted: msg }); return;
       }
       if (comando === 'pagamento') {
-        await sock.sendMessage(jid, { text: `💳 PAGAMENTO:\n\ne-Mola 877114280\nM-Pesa 856150578\nNome: Fenias Eduardo Pedro\n\nEnvie comprovativo em TEXTO + número destino` }, { quoted: msg }); return;
+        await sock.sendMessage(jid, { text: `💳 PAGAMENTO\n\nM-Pesa: 856150578\nE-Mola: 877114280\nNome: Fenias Eduardo Pedro` }, { quoted: msg }); return;
       }
-
-      if (isGroup && comando.startsWith('.ban')) {
+      if (comando === '.link') {
+        if (jid.endsWith('@g.us') &&!isSenderAdmin) return;
+        try { await sock.sendMessage(jid, { delete: { remoteJid: jid, fromMe: false, id: msg.key.id, participant: senderJid } }); } catch (e) {}
+        await sock.sendMessage(jid, { text: `LINK DO GRUPO\nhttps://chat.whatsapp.com/EtV0CHusTxK0Uz41bV2X5h` }); return;
+      }
+      if (comando === '.fechar') {
+        if (jid.endsWith('@g.us') &&!isSenderAdmin) return;
+        try { await sock.groupSettingUpdate(jid, 'announcement'); } catch (e) {}
+        await sock.sendMessage(jid, { text: `🔒 GRUPO FECHADO` }); return;
+      }
+      if (comando === '.abrir') {
+        if (jid.endsWith('@g.us') &&!isSenderAdmin) return;
+        try { await sock.groupSettingUpdate(jid, 'not_announcement'); } catch (e) {}
+        await sock.sendMessage(jid, { text: `✅ GRUPO ABERTO\n\nDigite tabela` }); return;
+      }
+      if (jid.endsWith('@g.us') && comando.startsWith('.ban')) {
         if (!isSenderAdmin) return;
         const ctx = msg.message.extendedTextMessage?.contextInfo;
         let targetJid = ctx?.participant || ctx?.mentionedJid?.[0];
-        if (!targetJid) { await sock.sendMessage(jid, { text: '⚠️ Responda a mensagem de quem quer banir com.ban' }, { quoted: msg }); return; }
-        if (groupAdmins.includes(targetJid)) { await sock.sendMessage(jid, { text: '⚠️ Não pode banir ADM' }, { quoted: msg }); return; }
-        await sock.sendMessage(jid, { text: `🚫 @${targetJid.split('@')[0]} removido`, mentions: [targetJid] });
+        if (!targetJid) return;
+        if (groupAdmins.includes(targetJid)) return;
         await sock.groupParticipantsUpdate(jid, [targetJid], 'remove').catch(() => {}); return;
       }
 
-      if (isGroup) {
-        const contemLink = /(https?:\/\/[^\s]+)|(chat\.whatsapp\.com\/[^\s]+)|(wa\.me\/[^\s]+)/i.test(textoProcessar);
-        if (contemLink &&!isSenderAdmin) {
+      // ===== BANIR LINK + APAGAR STATUS NO PERFIL DO GRUPO =====
+      if (jid.endsWith('@g.us') &&!isSenderAdmin) {
+        const isStatusNoGrupo = msg.message.groupStatusMentionMessage || msg.message.groupStatusMentionedJid || textoReal === "STATUS_MENCIONADO";
+        const contemLink = /(https?:\/\/|chat\.whatsapp\.com|wa\.me|www\.)/i.test(textoReal);
+        if (contemLink) {
           try {
             await sock.sendMessage(jid, { delete: { remoteJid: jid, fromMe: false, id: msg.key.id, participant: senderJid } });
             await sock.groupParticipantsUpdate(jid, [senderJid], 'remove');
-            await sock.sendMessage(jid, { text: `🚫 @${senderNumero} removido por link`, mentions: [senderJid] });
-          } catch (err) {}
+            await sock.sendMessage(jid, { text: `🚫 @${senderNumero} removido por enviar link.`, mentions: [senderJid] });
+          } catch (e) {}
+          return;
+        }
+        if (isStatusNoGrupo) {
+          try {
+            await sock.sendMessage(jid, { delete: { remoteJid: jid, fromMe: false, id: msg.key.id, participant: senderJid } });
+            await sock.sendMessage(jid, { text: `⚠️ Status no perfil do grupo apagado @${senderNumero}`, mentions: [senderJid] });
+          } catch (e) {}
           return;
         }
       }
 
-      if (comando.startsWith('.comprar')) {
-        if (isGroup &&!isSenderAdmin) return;
-        const partes = textoProcessar.split(/\s+/);
-        if (partes.length < 3) { await sock.sendMessage(jid, { text: 'Use:.comprar [pacote] [número]' }, { quoted: msg }); return; }
-        const pacoteDesejado = partes[1].toUpperCase(); const numeroDestino = partes[2];
-        if (!/^(84|85|86|87)\d{7}$/.test(numeroDestino)) { await sock.sendMessage(jid, { text: 'Número inválido' }, { quoted: msg }); return; }
-        const resp = await sock.sendMessage(jid, { text: `🚀 PEDIDO DIRETO\nPacote: ${pacoteDesejado}\nNúmero: ${numeroDestino}\n⏳ Processando...` }, { quoted: msg }).catch(() => {});
-        pedidoPendente = { numero: numeroDestino, pacote: pacoteDesejado, valor: "0", referencia: "DIRETO", jid, messageKey: resp?.key }; return;
-      }
-
-      const isReply = msg.message.extendedTextMessage?.contextInfo?.quotedMessage;
-      if (isReply && pedidoPendenteIncompleto) {
-        const numeroMatch = textoProcessar.match(/(84|85|86|87)\d{7}/);
-        if (numeroMatch) {
-          const numeroDestino = numeroMatch[0];
-          const dataHoraAtual = new Date().toLocaleString('pt-PT', { timeZone: 'Africa/Maputo' });
-          referenciasUtilizadas.set(pedidoPendenteIncompleto.referencia, { usuarioJid: senderJid, numeroLimpo: senderNumero, dataHora: dataHoraAtual });
-          const resp = await sock.sendMessage(jid, { text: `✅ PEDIDO RECEBIDO!\nRef: ${pedidoPendenteIncompleto.referencia}\nItem: ${pedidoPendenteIncompleto.pacote}\nNúmero: ${numeroDestino}\nValor: ${pedidoPendenteIncompleto.valor} MT` }, { quoted: msg }).catch(() => {});
-          pedidoPendente = { numero: numeroDestino, pacote: pedidoPendenteIncompleto.pacote, valor: pedidoPendenteIncompleto.valor, referencia: pedidoPendenteIncompleto.referencia, jid, messageKey: resp?.key };
-          pedidoPendenteIncompleto = null; return;
-        }
-      }
-
-      const matchValor = textoProcessar.match(/(\d+[\d\.,]*)\s*(MT|Meticais)/i);
+      const matchValor = textoReal.match(/(\d+[\d\.,]*)\s*(MT|Meticais)/i);
       if (matchValor) {
         let val = matchValor[1].replace(/,/g, ''); let valorLimpo = Math.floor(parseFloat(val)).toString();
         let tipoItem = tabelaPrecos[valorLimpo]; if (!tipoItem) return;
-        const matchRef = textoProcessar.match(/\b(PP\d{6}\.\d{4}\.[A-Z0-9]+)\b/i) || textoProcessar.match(/\b(DI\d+[A-Z0-9]*)\b/i) || textoProcessar.match(/\b(CO\d{6}\.\d{4}\.[A-Z0-9]+)\b/i) || textoProcessar.match(/\b(CI\d{6}\.\d{4}\.[A-Z0-9]+)\b/i) || textoProcessar.match(/Confirmado\s+([A-Z0-9]+)/i);
+        const matchRef = textoReal.match(/\b(PP\d{6}\.\d{4}\.[A-Z0-9]+)\b/i) || textoReal.match(/\b(DI\d+[A-Z0-9]*)\b/i) || textoReal.match(/\b(CO\d{6}\.\d{4}\.[A-Z0-9]+)\b/i) || textoReal.match(/\b(CI\d{6}\.\d{4}\.[A-Z0-9]+)\b/i) || textoReal.match(/Confirmado\s+([A-Z0-9]+)/i);
         let referencia = matchRef? (matchRef[1] || matchRef[0]) : null;
         if (referencia) referencia = referencia.replace(/^Confirmado\s+/i, '').replace(/[\.\,\;]$/, '').trim();
         if (referencia) {
           if (referenciasUtilizadas.has(referencia)) {
-            const dados = referenciasUtilizadas.get(referencia);
-            await sock.sendMessage(jid, { text: `❌ @${senderNumero} ID JÁ USADO: ${referencia}\nUsado em: ${dados.dataHora} por @${dados.numeroLimpo}`, mentions: [senderJid, dados.usuarioJid] }, { quoted: msg }); return;
+            await sock.sendMessage(jid, { text: `❌ ID JÁ USADO: ${referencia}`, mentions: [senderJid] }, { quoted: msg }); return;
           }
           let numeroDestino = null;
-          const linhas = textoProcessar.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-          if (linhas.length > 0) { const m = linhas[linhas.length - 1].match(/(84|85|86|87)\d{7}/); if (m) numeroDestino = m[0]; }
-          if (!numeroDestino) { const g = textoProcessar.match(/(84|85|86|87)\d{7}/g); if (g) numeroDestino = g[g.length - 1]; }
+          const geral = textoReal.match(/(84|85|86|87)\d{7}/g);
+          if (geral) numeroDestino = geral[geral.length - 1];
           if (!numeroDestino) {
             pedidoPendenteIncompleto = { pacote: tipoItem, valor: valorLimpo, referencia };
-            await sock.sendMessage(jid, { text: `⚠️ @${senderNumero} COMPROVATIVO OK MAS FALTA NÚMERO! (Ref: ${referencia})\nResponda com o número`, mentions: [senderJid] }, { quoted: msg }); return;
+            await sock.sendMessage(jid, { text: `⚠️ Recebido: ${referencia} - ${tipoItem}\nFalta o número.`, mentions: [senderJid] }, { quoted: msg }); return;
           }
           const dataHoraAtual = new Date().toLocaleString('pt-PT', { timeZone: 'Africa/Maputo' });
           referenciasUtilizadas.set(referencia, { usuarioJid: senderJid, numeroLimpo: senderNumero, dataHora: dataHoraAtual });
-          const resp = await sock.sendMessage(jid, { text: `✅ PEDIDO RECEBIDO!\nRef: ${referencia}\nItem: ${tipoItem}\nNúmero: ${numeroDestino}\nValor: ${valorLimpo} MT\n⏳ Processando...` }, { quoted: msg }).catch(() => {});
+          const resp = await sock.sendMessage(jid, { text: `✅ RECEBIDO\n\nRef: ${referencia}\nPacote: ${tipoItem}\nNúmero: ${numeroDestino}\nValor: ${valorLimpo}MT\n\nA processar...` }, { quoted: msg }).catch(() => {});
           pedidoPendente = { numero: numeroDestino, pacote: tipoItem, valor: valorLimpo, referencia, jid, messageKey: resp?.key };
         }
       }
-    } catch (err) { console.error('Erro:', err); }
+    } catch (err) { console.error(err); }
   });
 }
 connectToWhatsApp();
-app.listen(PORT, () => console.log(`Rodando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`Rodando na ${PORT}`));
